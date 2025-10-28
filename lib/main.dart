@@ -380,28 +380,75 @@ class _ChatScreenState extends State<ChatScreen> {
         repeatPenalty: 1.1,
       );
 
-      // Генерация с потоковым выводом
-      final assistantMessage = Message(text: '', isUser: false);
+      // Добавляем временное сообщение
+      final assistantMessage = Message(text: '🤔 Обдумываю ответ...', isUser: false);
       setState(() {
         _messages.add(assistantMessage);
         _selectedImages.clear();
       });
 
-      await for (final token in _llama.generateStream(params)) {
-        setState(() {
-          _currentResponse += token;
-          _messages[_messages.length - 1] = Message(
-            text: _currentResponse,
-            isUser: false,
-          );
-        });
+      _scrollToBottom();
 
-        _scrollToBottom();
+      // Пробуем потоковую генерацию, с fallback на блокирующую
+      bool streamSuccess = false;
+      
+      try {
+        await for (final token in _llama.generateStream(params)) {
+          streamSuccess = true;
+          setState(() {
+            _currentResponse += token;
+            _messages[_messages.length - 1] = Message(
+              text: _currentResponse,
+              isUser: false,
+            );
+          });
+          _scrollToBottom();
+        }
+      } catch (streamError) {
+        // Если потоковая генерация не работает, используем блокирующую
+        if (!streamSuccess) {
+          debugPrint('Stream error: $streamError. Falling back to blocking generation.');
+          
+          setState(() {
+            _messages[_messages.length - 1] = Message(
+              text: '⏳ Генерация ответа (это может занять некоторое время)...',
+              isUser: false,
+            );
+          });
+
+          final response = await _llama.generate(params);
+          
+          setState(() {
+            _currentResponse = response.text;
+            _messages[_messages.length - 1] = Message(
+              text: _currentResponse,
+              isUser: false,
+            );
+          });
+          
+          _scrollToBottom();
+        } else {
+          rethrow;
+        }
       }
     } catch (e) {
       setState(() {
-        _messages.add(Message(text: 'Ошибка генерации: $e', isUser: false));
+        if (_messages.isNotEmpty && !_messages.last.isUser) {
+          _messages[_messages.length - 1] = Message(
+            text: '❌ Ошибка генерации: $e\n\nПопробуйте:\n'
+                  '• Перезагрузить модель\n'
+                  '• Выбрать другую модель\n'
+                  '• Проверить формат модели (GGUF)',
+            isUser: false,
+          );
+        } else {
+          _messages.add(Message(
+            text: '❌ Ошибка генерации: $e',
+            isUser: false,
+          ));
+        }
       });
+      _scrollToBottom();
     } finally {
       setState(() {
         _isGenerating = false;
