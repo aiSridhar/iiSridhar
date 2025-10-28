@@ -66,5 +66,7 @@
 		<string>th</string>
 		<string>en</string>
 	</array>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.lifestyle</string>
 </dict>
 </plist>

@@ -1,16 +1,82 @@
-# isridhar
+# Шридхар Махарадж ИИ
 
-A new Flutter project.
+**Персональный духовный помощник с искусственным интеллектом**
 
-## Getting Started
+## Описание
 
-This project is a starting point for a Flutter application.
+Шридхар Махарадж ИИ - это революционное мобильное приложение, которое объединяет древнюю мудрость с современными технологиями искусственного интеллекта. Ваш персональный духовный наставник всегда с вами.
 
-A few resources to get you started if this is your first Flutter project:
+### Основные возможности
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+🧘 **Медитация и Йога**
+- Индивидуальные программы медитации
+- Рекомендации по практике йоги
+- Техники осознанности
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+📿 **Духовные учения**
+- Объяснение ведических текстов
+- Ответы на философские вопросы
+- Помощь в духовном развитии
+
+☮️ **Внутренний покой**
+- Техники релаксации
+- Работа с эмоциями
+- Путь к гармонии
+
+🌟 **Мультиязычность**
+- 🇷🇺 Русский
+- 🇪🇸 Испанский  
+- 🇮🇳 Хинди
+- 🇹🇭 Тайский
+
+### Технические характеристики
+
+- **Bundle ID**: com.sridharmaharaj
+- **SKU**: com.sridharmaharaj
+- **Apple ID**: 1481472115
+- **Версия**: 1.0.0
+- **Платформы**: iOS 13.0+, Android 5.0+
+
+### Технологии
+
+- Flutter 3.35+
+- llama.cpp для локального AI
+- GGUF модели (квантизация Q2_K)
+- GPU ускорение через Metal (iOS) / Vulkan (Android)
+- Оффлайн работа - никаких серверов
+
+### Приватность
+
+- ✅ Все данные хранятся локально
+- ✅ Нет отправки данных на серверы
+- ✅ Полная конфиденциальность
+- ✅ Работа без интернета
+
+## Установка для разработки
+
+```bash
+flutter pub get
+flutter run
+```
+
+## Сборка для релиза
+
+### iOS
+```bash
+flutter build ios --release
+```
+
+### Android
+```bash
+flutter build apk --release
+flutter build appbundle --release
+```
+
+## Контакты
+
+- Email: licensing@nativemind.net
+- Website: https://nativemind.net
+
+---
+
+© 2025 NativeMind. All rights reserved.
