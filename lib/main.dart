@@ -381,7 +381,10 @@ class _ChatScreenState extends State<ChatScreen> {
       );
 
       // Добавляем временное сообщение
-      final assistantMessage = Message(text: '🤔 Обдумываю ответ...', isUser: false);
+      final assistantMessage = Message(
+        text: '🤔 Обдумываю ответ...',
+        isUser: false,
+      );
       setState(() {
         _messages.add(assistantMessage);
         _selectedImages.clear();
@@ -391,7 +394,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
       // Пробуем потоковую генерацию, с fallback на блокирующую
       bool streamSuccess = false;
-      
+
       try {
         await for (final token in _llama.generateStream(params)) {
           streamSuccess = true;
@@ -407,8 +410,10 @@ class _ChatScreenState extends State<ChatScreen> {
       } catch (streamError) {
         // Если потоковая генерация не работает, используем блокирующую
         if (!streamSuccess) {
-          debugPrint('Stream error: $streamError. Falling back to blocking generation.');
-          
+          debugPrint(
+            'Stream error: $streamError. Falling back to blocking generation.',
+          );
+
           setState(() {
             _messages[_messages.length - 1] = Message(
               text: '⏳ Генерация ответа (это может занять некоторое время)...',
@@ -417,7 +422,7 @@ class _ChatScreenState extends State<ChatScreen> {
           });
 
           final response = await _llama.generate(params);
-          
+
           setState(() {
             _currentResponse = response.text;
             _messages[_messages.length - 1] = Message(
@@ -425,7 +430,7 @@ class _ChatScreenState extends State<ChatScreen> {
               isUser: false,
             );
           });
-          
+
           _scrollToBottom();
         } else {
           rethrow;
@@ -435,17 +440,15 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         if (_messages.isNotEmpty && !_messages.last.isUser) {
           _messages[_messages.length - 1] = Message(
-            text: '❌ Ошибка генерации: $e\n\nПопробуйте:\n'
-                  '• Перезагрузить модель\n'
-                  '• Выбрать другую модель\n'
-                  '• Проверить формат модели (GGUF)',
+            text:
+                '❌ Ошибка генерации: $e\n\nПопробуйте:\n'
+                '• Перезагрузить модель\n'
+                '• Выбрать другую модель\n'
+                '• Проверить формат модели (GGUF)',
             isUser: false,
           );
         } else {
-          _messages.add(Message(
-            text: '❌ Ошибка генерации: $e',
-            isUser: false,
-          ));
+          _messages.add(Message(text: '❌ Ошибка генерации: $e', isUser: false));
         }
       });
       _scrollToBottom();
