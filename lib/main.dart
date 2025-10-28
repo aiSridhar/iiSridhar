@@ -4,7 +4,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'package:flutter/services.dart';
-import 'package:path/path.dart' as path;
 import 'screens/model_manager_screen.dart';
 import 'services/model_downloader.dart';
 
@@ -104,14 +103,38 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Выбор модели
   Future<void> _pickModel() async {
     try {
+      setState(() {
+        _addSystemMessage('Открытие диалога выбора файла...');
+      });
+
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['gguf', 'safetensors'],
+        allowedExtensions: ['gguf', 'safetensors', 'bin'],
+        dialogTitle: 'Выберите файл модели',
+        withData: false, // Не загружаем в память, только путь
+        lockParentWindow: true,
       );
 
       if (result != null && result.files.single.path != null) {
-        _modelPath = result.files.single.path!;
+        final filePath = result.files.single.path!;
+        final fileName = result.files.single.name;
+        final fileSize = result.files.single.size;
+
+        // Показываем информацию о выбранном файле
+        setState(() {
+          _addSystemMessage(
+            'Выбран файл: $fileName\n'
+            'Размер: ${(fileSize / 1024 / 1024).toStringAsFixed(2)} MB\n'
+            'Загрузка модели...',
+          );
+        });
+
+        _modelPath = filePath;
         await _loadModel();
+      } else {
+        setState(() {
+          _addSystemMessage('Выбор файла отменён');
+        });
       }
     } catch (e) {
       _addSystemMessage('Ошибка выбора файла: $e');
@@ -206,7 +229,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final success = await _llama.loadModel(config);
 
       if (success) {
-        final info = await _llama.getModelInfo();
+        await _llama.getModelInfo();
         setState(() {
           _isModelLoaded = true;
           _addSystemMessage(
@@ -255,19 +278,52 @@ class _ChatScreenState extends State<ChatScreen> {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.image,
         allowMultiple: true,
+        dialogTitle: 'Выберите изображения',
+        withData: false,
+        lockParentWindow: true,
+        allowedExtensions: null, // Все форматы изображений
       );
 
       if (result != null) {
-        setState(() {
-          _selectedImages.addAll(
-            result.files
-                .map((file) => file.path!)
-                .where((path) => path.isNotEmpty),
-          );
-        });
+        final newImages = result.files
+            .where((file) => file.path != null && file.path!.isNotEmpty)
+            .map((file) => file.path!)
+            .toList();
+
+        if (newImages.isNotEmpty) {
+          setState(() {
+            _selectedImages.addAll(newImages);
+          });
+
+          // Показываем уведомление
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  '${newImages.length} ${_pluralizeImages(newImages.length)} добавлено',
+                ),
+                duration: const Duration(seconds: 2),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        }
       }
     } catch (e) {
       _addSystemMessage('Ошибка выбора изображений: $e');
+    }
+  }
+
+  /// Плюрализация для изображений
+  String _pluralizeImages(int count) {
+    if (count % 10 == 1 && count % 100 != 11) {
+      return 'изображение';
+    } else if (count % 10 >= 2 &&
+        count % 10 <= 4 &&
+        (count % 100 < 10 || count % 100 >= 20)) {
+      return 'изображения';
+    } else {
+      return 'изображений';
     }
   }
 
@@ -718,13 +774,17 @@ class _ChatScreenState extends State<ChatScreen> {
                     color: isUser ? userBubbleColor : aiBubbleColor,
                     borderRadius: BorderRadius.circular(18),
                   ),
-                  child: Text(
+                  child: SelectableText(
                     message.text,
                     style: TextStyle(
                       color: isUser ? Colors.white : null,
                       fontSize: 15,
                       height: 1.4,
                     ),
+                    cursorColor: isUser
+                        ? Colors.white
+                        : const Color(0xFF10A37F),
+                    selectionControls: materialTextSelectionControls,
                   ),
                 ),
               ],
