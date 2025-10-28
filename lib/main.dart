@@ -6,6 +6,8 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'screens/model_manager_screen.dart';
 import 'services/model_downloader.dart';
+import 'models/prompt_mode.dart';
+import 'models/dialog_session.dart';
 
 void main() {
   runApp(const MyApp());
@@ -54,17 +56,41 @@ class MyApp extends StatelessWidget {
 }
 
 class Message {
+  final String id;
   final String text;
   final bool isUser;
   final List<String>? imagePaths;
   final DateTime timestamp;
+  final String? replyToId; // ID сообщения, на которое отвечаем
+  final List<Map<String, String>>?
+  context; // Контекст диалога для этого сообщения
 
   Message({
+    String? id,
     required this.text,
     required this.isUser,
     this.imagePaths,
     DateTime? timestamp,
-  }) : timestamp = timestamp ?? DateTime.now();
+    this.replyToId,
+    this.context,
+  }) : id = id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+       timestamp = timestamp ?? DateTime.now();
+
+  Message copyWith({
+    String? text,
+    String? replyToId,
+    List<Map<String, String>>? context,
+  }) {
+    return Message(
+      id: id,
+      text: text ?? this.text,
+      isUser: isUser,
+      imagePaths: imagePaths,
+      timestamp: timestamp,
+      replyToId: replyToId ?? this.replyToId,
+      context: context ?? this.context,
+    );
+  }
 }
 
 class ChatScreen extends StatefulWidget {
@@ -80,11 +106,31 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   final List<Message> _messages = [];
   final List<String> _selectedImages = [];
+  final Map<String, List<Map<String, String>>> _dialogContexts =
+      {}; // Контексты для каждого сообщения
 
   bool _isModelLoaded = false;
   bool _isGenerating = false;
   String _modelPath = '';
   String _currentResponse = '';
+
+  // Режим промпта
+  PromptMode _currentPromptMode = PromptModes.spiritual;
+
+  // Режим ведения беседы
+  ConversationMode _conversationMode = ConversationMode.qa;
+
+  // Глобальный контекст для режима диалога
+  List<Map<String, String>> _globalDialogContext = [];
+
+  // Список сохраненных диалогов
+  final List<DialogSession> _savedDialogs = [];
+
+  // Текущий активный диалог
+  DialogSession? _currentDialog;
+
+  // Сообщение для reply
+  Message? _replyToMessage;
 
   @override
   void initState() {
@@ -353,6 +399,7 @@ class _ChatScreenState extends State<ChatScreen> {
       imagePaths: _selectedImages.isNotEmpty
           ? List.from(_selectedImages)
           : null,
+      replyToId: _replyToMessage?.id,
     );
 
     setState(() {
@@ -364,11 +411,48 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _scrollToBottom();
 
-    // Формируем промпт с учётом мультимодальности
-    String prompt = text;
-    if (_selectedImages.isNotEmpty) {
-      prompt = '[IMAGE] $text';
+    // Получаем контекст диалога в зависимости от режима
+    List<Map<String, String>> dialogContext = [];
+
+    if (_conversationMode == ConversationMode.dialog) {
+      // Режим диалога - используем глобальный контекст
+      if (_globalDialogContext.isEmpty) {
+        // Инициализируем, если пустой
+        _globalDialogContext.add({
+          'role': 'system',
+          'content': _currentPromptMode.systemPrompt,
+        });
+      }
+      dialogContext = List.from(_globalDialogContext);
+    } else {
+      // Режим Q&A - каждый вопрос независимый
+      // Если это reply, используем контекст из того сообщения
+      if (_replyToMessage != null) {
+        dialogContext = _dialogContexts[_replyToMessage!.id] ?? [];
+      }
+
+      // Добавляем системный промпт если контекст пустой
+      if (dialogContext.isEmpty) {
+        dialogContext.add({
+          'role': 'system',
+          'content': _currentPromptMode.systemPrompt,
+        });
+      }
     }
+
+    // Добавляем текущий вопрос пользователя
+    dialogContext.add({'role': 'user', 'content': text});
+
+    // Формируем промпт с учётом мультимодальности
+    String prompt = _buildPromptFromContext(dialogContext);
+    if (_selectedImages.isNotEmpty) {
+      prompt = '[IMAGE] $prompt';
+    }
+
+    // Сбрасываем reply
+    setState(() {
+      _replyToMessage = null;
+    });
 
     try {
       final params = GenerationParams(
@@ -436,6 +520,27 @@ class _ChatScreenState extends State<ChatScreen> {
           rethrow;
         }
       }
+
+      // Сохраняем контекст диалога для ответа
+      if (_currentResponse.isNotEmpty) {
+        // Добавляем ответ ассистента к контексту
+        dialogContext.add({'role': 'assistant', 'content': _currentResponse});
+
+        if (_conversationMode == ConversationMode.dialog) {
+          // В режиме диалога обновляем глобальный контекст
+          _globalDialogContext = List.from(dialogContext);
+        } else {
+          // В режиме Q&A сохраняем контекст только для reply
+          // Сохраняем контекст для последнего сообщения (ответа AI)
+          final lastMessage = _messages.last;
+          _dialogContexts[lastMessage.id] = List.from(dialogContext);
+
+          // Также сохраняем для пользовательского сообщения (для reply на вопрос)
+          _dialogContexts[userMessage.id] = List.from(
+            dialogContext.take(dialogContext.length - 1),
+          );
+        }
+      }
     } catch (e) {
       setState(() {
         if (_messages.isNotEmpty && !_messages.last.isUser) {
@@ -460,12 +565,500 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Сохранить текущий диалог
+  void _saveCurrentDialog() {
+    if (_messages.isEmpty) return;
+
+    final now = DateTime.now();
+
+    if (_currentDialog == null) {
+      // Создаем новый диалог
+      final newDialog = DialogSession(
+        id: now.millisecondsSinceEpoch.toString(),
+        title: DialogSession.generateTitle(_messages),
+        createdAt: now,
+        updatedAt: now,
+        messages: List.from(_messages),
+        promptModeId: _currentPromptMode.id,
+        conversationModeId: _conversationMode.name,
+      );
+
+      setState(() {
+        _savedDialogs.insert(0, newDialog);
+        _currentDialog = newDialog;
+      });
+    } else {
+      // Обновляем существующий
+      final updatedDialog = _currentDialog!.copyWith(
+        title: DialogSession.generateTitle(_messages),
+        updatedAt: now,
+        messages: List.from(_messages),
+        promptModeId: _currentPromptMode.id,
+        conversationModeId: _conversationMode.name,
+      );
+
+      setState(() {
+        final index = _savedDialogs.indexWhere(
+          (d) => d.id == _currentDialog!.id,
+        );
+        if (index != -1) {
+          _savedDialogs[index] = updatedDialog;
+        }
+        _currentDialog = updatedDialog;
+      });
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('💾 Диалог сохранен'),
+          duration: Duration(seconds: 1),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Загрузить диалог
+  void _loadDialog(DialogSession dialog) {
+    setState(() {
+      _currentDialog = dialog;
+      _messages.clear();
+      _messages.addAll(dialog.messages);
+      _currentPromptMode = PromptModes.getById(dialog.promptModeId);
+
+      // Восстанавливаем режим разговора
+      if (dialog.conversationModeId == ConversationMode.dialog.name) {
+        _conversationMode = ConversationMode.dialog;
+      } else {
+        _conversationMode = ConversationMode.qa;
+      }
+    });
+
+    Navigator.pop(context); // Закрываем drawer
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('📂 Загружен: ${dialog.title}'),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Создать новый диалог
+  void _newDialog() {
+    // Если есть несохраненные изменения, предложить сохранить
+    if (_messages.isNotEmpty) {
+      _saveCurrentDialog();
+    }
+
+    setState(() {
+      _currentDialog = null;
+      _messages.clear();
+      _dialogContexts.clear();
+      _globalDialogContext.clear();
+      _replyToMessage = null;
+    });
+
+    Navigator.pop(context); // Закрываем drawer
+  }
+
+  /// Удалить диалог
+  void _deleteDialog(DialogSession dialog) {
+    setState(() {
+      _savedDialogs.removeWhere((d) => d.id == dialog.id);
+
+      // Если удаляем текущий диалог, очищаем его
+      if (_currentDialog?.id == dialog.id) {
+        _currentDialog = null;
+        _messages.clear();
+        _dialogContexts.clear();
+        _globalDialogContext.clear();
+      }
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🗑️ Диалог удален'),
+          duration: Duration(seconds: 1),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   /// Очистка чата
   void _clearChat() {
+    // Автосохранение перед очисткой
+    if (_messages.isNotEmpty) {
+      _saveCurrentDialog();
+    }
+
     setState(() {
+      _currentDialog = null;
       _messages.clear();
-      _addSystemMessage('Чат очищен');
+      _dialogContexts.clear();
+      _globalDialogContext.clear();
+      _replyToMessage = null;
+      _addSystemMessage('Чат очищен. Начат новый диалог.');
     });
+  }
+
+  /// Переключение режима разговора
+  void _toggleConversationMode() {
+    setState(() {
+      if (_conversationMode == ConversationMode.dialog) {
+        _conversationMode = ConversationMode.qa;
+        _globalDialogContext.clear();
+      } else {
+        _conversationMode = ConversationMode.dialog;
+        // Инициализируем глобальный контекст с системным промптом
+        _globalDialogContext = [
+          {'role': 'system', 'content': _currentPromptMode.systemPrompt},
+        ];
+      }
+    });
+
+    // Показать уведомление
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${_conversationMode.emoji} ${_conversationMode.name}: ${_conversationMode.description}',
+          ),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Построение промпта из контекста
+  String _buildPromptFromContext(List<Map<String, String>> context) {
+    final buffer = StringBuffer();
+    for (var message in context) {
+      final role = message['role'] ?? 'user';
+      final content = message['content'] ?? '';
+
+      if (role == 'system') {
+        buffer.writeln('System: $content\n');
+      } else if (role == 'user') {
+        buffer.writeln('User: $content\n');
+      } else if (role == 'assistant') {
+        buffer.writeln('Assistant: $content\n');
+      }
+    }
+    return buffer.toString();
+  }
+
+  /// Установить сообщение для reply
+  void _setReplyTo(Message message) {
+    setState(() {
+      _replyToMessage = message;
+    });
+
+    // Прокрутить к полю ввода
+    _scrollToBottom();
+  }
+
+  /// Отменить reply
+  void _cancelReply() {
+    setState(() {
+      _replyToMessage = null;
+    });
+  }
+
+  /// Изменить режим промпта
+  void _changePromptMode(PromptMode mode) {
+    setState(() {
+      _currentPromptMode = mode;
+    });
+
+    // Показать уведомление
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${mode.emoji} Режим изменён: ${mode.name}'),
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  /// Показать контекстное меню для сообщения
+  void _showMessageContextMenu(
+    BuildContext context,
+    Message message,
+    Offset position,
+  ) {
+    final RenderBox overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+
+    showMenu(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(position.dx, position.dy, 0, 0),
+        Rect.fromLTWH(0, 0, overlay.size.width, overlay.size.height),
+      ),
+      items: [
+        PopupMenuItem(
+          child: Row(
+            children: [
+              const Icon(Icons.reply, size: 20, color: Color(0xFFFF9800)),
+              const SizedBox(width: 12),
+              const Text('Ответить на сообщение'),
+            ],
+          ),
+          onTap: () {
+            // Используем Future.delayed чтобы не конфликтовать с закрытием меню
+            Future.delayed(const Duration(milliseconds: 100), () {
+              _setReplyTo(message);
+
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text('💬 Ответить на это сообщение'),
+                    duration: const Duration(seconds: 1),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            });
+          },
+        ),
+        PopupMenuItem(
+          child: Row(
+            children: [
+              const Icon(Icons.copy, size: 20, color: Colors.blue),
+              const SizedBox(width: 12),
+              const Text('Копировать текст'),
+            ],
+          ),
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: message.text));
+
+            Future.delayed(const Duration(milliseconds: 100), () {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Text('📋 Текст скопирован'),
+                    duration: const Duration(seconds: 1),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            });
+          },
+        ),
+        if (message.replyToId != null)
+          PopupMenuItem(
+            child: Row(
+              children: [
+                const Icon(Icons.history, size: 20, color: Colors.grey),
+                const SizedBox(width: 12),
+                const Text('Показать контекст'),
+              ],
+            ),
+            onTap: () {
+              Future.delayed(const Duration(milliseconds: 100), () {
+                _showMessageContext(message);
+              });
+            },
+          ),
+        PopupMenuItem(
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, size: 20, color: Colors.grey[600]),
+              const SizedBox(width: 12),
+              const Text('Информация'),
+            ],
+          ),
+          onTap: () {
+            Future.delayed(const Duration(milliseconds: 100), () {
+              _showMessageInfo(message);
+            });
+          },
+        ),
+      ],
+    );
+  }
+
+  /// Показать контекст сообщения
+  void _showMessageContext(Message message) {
+    final dialogContext = _dialogContexts[message.id];
+
+    if (dialogContext == null || dialogContext.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Контекст не найден'),
+            duration: Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Контекст диалога'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: dialogContext.map((msg) {
+              final role = msg['role'] ?? '';
+              final content = msg['content'] ?? '';
+
+              String roleLabel;
+              Color roleColor;
+              IconData roleIcon;
+
+              switch (role) {
+                case 'system':
+                  roleLabel = 'Система';
+                  roleColor = Colors.purple;
+                  roleIcon = Icons.settings;
+                  break;
+                case 'user':
+                  roleLabel = 'Пользователь';
+                  roleColor = Colors.blue;
+                  roleIcon = Icons.person;
+                  break;
+                case 'assistant':
+                  roleLabel = 'Ассистент';
+                  roleColor = Colors.green;
+                  roleIcon = Icons.auto_awesome;
+                  break;
+                default:
+                  roleLabel = role;
+                  roleColor = Colors.grey;
+                  roleIcon = Icons.message;
+              }
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(roleIcon, size: 16, color: roleColor),
+                        const SizedBox(width: 8),
+                        Text(
+                          roleLabel,
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: roleColor,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: roleColor.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        content.length > 200
+                            ? '${content.substring(0, 200)}...'
+                            : content,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Показать информацию о сообщении
+  void _showMessageInfo(Message message) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Информация о сообщении'),
+        content: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildInfoRow('ID:', message.id),
+            _buildInfoRow(
+              'Время:',
+              '${message.timestamp.hour.toString().padLeft(2, '0')}:'
+                  '${message.timestamp.minute.toString().padLeft(2, '0')}:'
+                  '${message.timestamp.second.toString().padLeft(2, '0')}',
+            ),
+            _buildInfoRow(
+              'Дата:',
+              '${message.timestamp.day}.${message.timestamp.month}.${message.timestamp.year}',
+            ),
+            _buildInfoRow(
+              'Тип:',
+              message.isUser ? 'Пользователь' : 'Ассистент',
+            ),
+            if (message.replyToId != null)
+              _buildInfoRow('Reply ID:', message.replyToId!),
+            if (message.imagePaths != null && message.imagePaths!.isNotEmpty)
+              _buildInfoRow(
+                'Изображений:',
+                message.imagePaths!.length.toString(),
+              ),
+            _buildInfoRow('Символов:', message.text.length.toString()),
+            if (_dialogContexts[message.id] != null)
+              _buildInfoRow(
+                'Контекст:',
+                '${_dialogContexts[message.id]!.length} сообщений',
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 100,
+            child: Text(
+              label,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+            ),
+          ),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 13))),
+        ],
+      ),
+    );
   }
 
   @override
@@ -480,6 +1073,7 @@ class _ChatScreenState extends State<ChatScreen> {
         : const Color(0xFFF7F7F8);
 
     return Scaffold(
+      drawer: _buildDrawer(context),
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
@@ -502,46 +1096,109 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ],
               ),
-              child: const Icon(
-                Icons.self_improvement,
-                color: Colors.white,
-                size: 22,
+              child: Text(
+                _currentPromptMode.emoji,
+                style: const TextStyle(fontSize: 20),
               ),
             ),
             const SizedBox(width: 12),
-            const Column(
+            Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
+                const Text(
                   'Шридхар Махарадж ИИ',
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                 ),
-                Text(
-                  'Духовный наставник',
-                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _currentPromptMode.name,
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                    const Text(
+                      ' • ',
+                      style: TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                    Text(
+                      _conversationMode.name,
+                      style: const TextStyle(fontSize: 10, color: Colors.grey),
+                    ),
+                  ],
                 ),
               ],
             ),
           ],
         ),
         actions: [
+          // Кнопка выбора режима промптов
           IconButton(
-            icon: const Icon(Icons.cloud_download_outlined),
-            onPressed: _openModelManager,
-            tooltip: 'Менеджер моделей',
+            icon: Text(
+              _currentPromptMode.emoji,
+              style: const TextStyle(fontSize: 22),
+            ),
+            onPressed: _showPromptModesMenu,
+            tooltip: 'Режим: ${_currentPromptMode.name}',
           ),
+          // Переключатель режима разговора
+          IconButton(
+            icon: Text(
+              _conversationMode.emoji,
+              style: const TextStyle(fontSize: 20),
+            ),
+            onPressed: _toggleConversationMode,
+            tooltip:
+                '${_conversationMode.name}\n${_conversationMode.description}',
+          ),
+          // Сохранить диалог
+          if (_messages.isNotEmpty)
+            IconButton(
+              icon: const Icon(Icons.save_outlined),
+              onPressed: _saveCurrentDialog,
+              tooltip: 'Сохранить диалог',
+            ),
+          // Очистить/Новый чат
           if (_isModelLoaded)
             IconButton(
-              icon: const Icon(Icons.delete_outline),
-              onPressed: _clearChat,
-              tooltip: 'Очистить чат',
+              icon: const Icon(Icons.add),
+              onPressed: _newDialog,
+              tooltip: 'Новый диалог',
             ),
-          IconButton(
-            icon: Icon(_isModelLoaded ? Icons.check_circle : Icons.file_open),
-            color: _isModelLoaded ? Colors.green : Colors.grey,
-            onPressed: _isModelLoaded ? null : _pickModel,
-            tooltip: _isModelLoaded ? 'Модель загружена' : 'Выбрать модель',
+          // Менеджер моделей
+          PopupMenuButton(
+            icon: Icon(_isModelLoaded ? Icons.more_vert : Icons.file_open),
+            tooltip: 'Меню',
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'models',
+                child: const Row(
+                  children: [
+                    Icon(Icons.cloud_download_outlined),
+                    SizedBox(width: 12),
+                    Text('Менеджер моделей'),
+                  ],
+                ),
+              ),
+              if (_isModelLoaded)
+                PopupMenuItem(
+                  value: 'reload',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, color: Colors.orange[700]),
+                      const SizedBox(width: 12),
+                      const Text('Перезагрузить модель'),
+                    ],
+                  ),
+                ),
+            ],
+            onSelected: (value) {
+              if (value == 'models') {
+                _openModelManager();
+              } else if (value == 'reload') {
+                _loadModel();
+              }
+            },
           ),
         ],
       ),
@@ -674,6 +1331,9 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
 
+          // Панель reply (если выбрано сообщение)
+          if (_replyToMessage != null) _buildReplyPanel()!,
+
           // Поле ввода
           Container(
             decoration: BoxDecoration(
@@ -765,93 +1425,525 @@ class _ChatScreenState extends State<ChatScreen> {
     final isUser = message.isUser;
     final hasImages =
         message.imagePaths != null && message.imagePaths!.isNotEmpty;
+    final isReplyingTo = _replyToMessage?.id == message.id;
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        mainAxisAlignment: isUser
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isUser) ...[
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: const Color(0xFF10A37F),
-                borderRadius: BorderRadius.circular(8),
+    return GestureDetector(
+      onLongPress: () {
+        // Долгое нажатие для установки reply
+        _setReplyTo(message);
+
+        // Показать feedback
+        HapticFeedback.mediumImpact();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('💬 Ответить на это сообщение'),
+              duration: const Duration(seconds: 1),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      },
+      onSecondaryTapDown: (details) {
+        // Правая кнопка мыши - показать контекстное меню
+        _showMessageContextMenu(context, message, details.globalPosition);
+      },
+      child: Container(
+        padding: const EdgeInsets.only(bottom: 16),
+        decoration: isReplyingTo
+            ? BoxDecoration(
+                color: const Color(0xFFFF9800).withOpacity(0.1),
+                border: const Border(
+                  left: BorderSide(color: Color(0xFFFF9800), width: 3),
+                ),
+              )
+            : null,
+        child: Padding(
+          padding: isReplyingTo
+              ? const EdgeInsets.only(left: 8)
+              : EdgeInsets.zero,
+          child: Row(
+            mainAxisAlignment: isUser
+                ? MainAxisAlignment.end
+                : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!isUser) ...[
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF10A37F),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.auto_awesome,
+                    color: Colors.white,
+                    size: 16,
+                  ),
+                ),
+                const SizedBox(width: 12),
+              ],
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: isUser
+                      ? CrossAxisAlignment.end
+                      : CrossAxisAlignment.start,
+                  children: [
+                    if (hasImages)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: message.imagePaths!.map((imagePath) {
+                            return ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.file(
+                                File(imagePath),
+                                width: 200,
+                                height: 200,
+                                fit: BoxFit.cover,
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: isUser ? userBubbleColor : aiBubbleColor,
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: SelectableText(
+                        message.text,
+                        style: TextStyle(
+                          color: isUser ? Colors.white : null,
+                          fontSize: 15,
+                          height: 1.4,
+                        ),
+                        cursorColor: isUser
+                            ? Colors.white
+                            : const Color(0xFF10A37F),
+                        selectionControls: materialTextSelectionControls,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-              child: const Icon(
-                Icons.auto_awesome,
-                color: Colors.white,
-                size: 16,
+              if (isUser) ...[
+                const SizedBox(width: 12),
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[600],
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(
+                    Icons.person,
+                    color: Colors.white,
+                    size: 16,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Построение Drawer со списком диалогов
+  Widget _buildDrawer(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Drawer(
+      child: Column(
+        children: [
+          DrawerHeader(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  const Color(0xFFFF9800),
+                  const Color(0xFFFFB74D).withOpacity(0.8),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
             ),
-            const SizedBox(width: 12),
-          ],
-          Flexible(
             child: Column(
-              crossAxisAlignment: isUser
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                if (hasImages)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: message.imagePaths!.map((imagePath) {
-                        return ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            File(imagePath),
-                            width: 200,
-                            height: 200,
-                            fit: BoxFit.cover,
-                          ),
-                        );
-                      }).toList(),
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline,
+                      size: 40,
+                      color: Colors.white,
                     ),
-                  ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
-                    color: isUser ? userBubbleColor : aiBubbleColor,
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: SelectableText(
-                    message.text,
-                    style: TextStyle(
-                      color: isUser ? Colors.white : null,
-                      fontSize: 15,
-                      height: 1.4,
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Диалоги',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
-                    cursorColor: isUser
-                        ? Colors.white
-                        : const Color(0xFF10A37F),
-                    selectionControls: materialTextSelectionControls,
-                  ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${_savedDialogs.length} сохраненных',
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
               ],
             ),
           ),
-          if (isUser) ...[
-            const SizedBox(width: 12),
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: Colors.grey[600],
-                borderRadius: BorderRadius.circular(8),
+
+          // Кнопка создания нового диалога
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: ElevatedButton.icon(
+              onPressed: _newDialog,
+              icon: const Icon(Icons.add),
+              label: const Text('Новый диалог'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFFF9800),
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 48),
               ),
-              child: const Icon(Icons.person, color: Colors.white, size: 16),
             ),
-          ],
+          ),
+
+          const Divider(),
+
+          // Список сохраненных диалогов
+          Expanded(
+            child: _savedDialogs.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.chat_outlined,
+                            size: 64,
+                            color: isDark ? Colors.grey[700] : Colors.grey[300],
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Нет сохраненных диалогов',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: isDark
+                                  ? Colors.grey[600]
+                                  : Colors.grey[400],
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Начните новый диалог и он автоматически сохранится',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: isDark
+                                  ? Colors.grey[700]
+                                  : Colors.grey[500],
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _savedDialogs.length,
+                    itemBuilder: (context, index) {
+                      final dialog = _savedDialogs[index];
+                      final isActive = _currentDialog?.id == dialog.id;
+                      final messageCount = dialog.messages
+                          .where((m) => m.isUser)
+                          .length;
+
+                      return ListTile(
+                        leading: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: isActive
+                                ? const Color(0xFFFF9800)
+                                : (isDark
+                                      ? Colors.grey[800]
+                                      : Colors.grey[200]),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(
+                            Icons.chat,
+                            color: isActive
+                                ? Colors.white
+                                : (isDark
+                                      ? Colors.grey[400]
+                                      : Colors.grey[600]),
+                          ),
+                        ),
+                        title: Text(
+                          dialog.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            color: isActive ? const Color(0xFFFF9800) : null,
+                          ),
+                        ),
+                        subtitle: Text(
+                          '$messageCount сообщений • ${_formatDate(dialog.updatedAt)}',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark ? Colors.grey[500] : Colors.grey[600],
+                          ),
+                        ),
+                        selected: isActive,
+                        selectedTileColor: const Color(
+                          0xFFFF9800,
+                        ).withOpacity(0.1),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 20),
+                          onPressed: () => _deleteDialog(dialog),
+                          tooltip: 'Удалить',
+                        ),
+                        onTap: () => _loadDialog(dialog),
+                      );
+                    },
+                  ),
+          ),
+
+          const Divider(),
+
+          // Настройки внизу
+          ListTile(
+            leading: const Icon(Icons.save_outlined),
+            title: const Text('Сохранить текущий'),
+            enabled: _messages.isNotEmpty,
+            onTap: () {
+              _saveCurrentDialog();
+              Navigator.pop(context);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Форматирование даты
+  String _formatDate(DateTime date) {
+    final now = DateTime.now();
+    final diff = now.difference(date);
+
+    if (diff.inMinutes < 1) return 'только что';
+    if (diff.inHours < 1) return '${diff.inMinutes} мин назад';
+    if (diff.inDays < 1) return '${diff.inHours} ч назад';
+    if (diff.inDays < 7) return '${diff.inDays} дн назад';
+
+    return '${date.day}.${date.month}.${date.year}';
+  }
+
+  /// Показать меню выбора режима промптов
+  void _showPromptModesMenu() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Заголовок
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.psychology, color: Color(0xFFFF9800)),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        'Выберите режим промпта',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.info_outline),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _showPromptInfo(context);
+                      },
+                      tooltip: 'О режимах',
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(),
+              // Список режимов
+              ...PromptModes.all.map((mode) {
+                final isSelected = _currentPromptMode.id == mode.id;
+                return ListTile(
+                  leading: Text(
+                    mode.emoji,
+                    style: const TextStyle(fontSize: 28),
+                  ),
+                  title: Text(
+                    mode.name,
+                    style: TextStyle(
+                      fontWeight: isSelected
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                      color: isSelected ? const Color(0xFFFF9800) : null,
+                    ),
+                  ),
+                  subtitle: Text(
+                    mode.description,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: isSelected
+                      ? const Icon(Icons.check_circle, color: Color(0xFFFF9800))
+                      : null,
+                  selected: isSelected,
+                  selectedTileColor: const Color(0xFFFF9800).withOpacity(0.1),
+                  onTap: () {
+                    _changePromptMode(mode);
+                    Navigator.pop(context);
+                  },
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Показать информацию о режимах
+  void _showPromptInfo(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('О режимах промптов'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Различные режимы изменяют поведение AI, давая ему разные инструкции и роли:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              ...PromptModes.all.map((mode) {
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            mode.emoji,
+                            style: const TextStyle(fontSize: 20),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            mode.name,
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        mode.description,
+                        style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Построение панели reply
+  Widget? _buildReplyPanel() {
+    if (_replyToMessage == null) return null;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFF9800).withOpacity(0.1),
+        border: const Border(
+          left: BorderSide(color: Color(0xFFFF9800), width: 4),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.reply, size: 20, color: Color(0xFFFF9800)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _replyToMessage!.isUser
+                      ? 'Ваше сообщение'
+                      : 'Шридхар Махарадж',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: Color(0xFFFF9800),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _replyToMessage!.text.length > 50
+                      ? '${_replyToMessage!.text.substring(0, 50)}...'
+                      : _replyToMessage!.text,
+                  style: const TextStyle(fontSize: 13),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 20),
+            onPressed: _cancelReply,
+            tooltip: 'Отменить',
+          ),
         ],
       ),
     );
