@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_llama/flutter_llama.dart';
-import '../utils/model_downloader.dart';
+import '../services/model_downloader.dart' as downloader;
 
 /// Экран для тестирования загрузки и работы с моделями
 class ModelTestScreen extends StatefulWidget {
@@ -21,6 +21,7 @@ class _ModelTestScreenState extends State<ModelTestScreen> {
   double _downloadProgress = 0.0;
   String _output = '';
   String _statusMessage = 'Выберите модель для начала';
+  String _downloadStatus = '';
 
   final List<String> _logs = [];
 
@@ -38,7 +39,7 @@ class _ModelTestScreenState extends State<ModelTestScreen> {
 
   Future<void> _loadAvailableModels() async {
     _addLog('Загрузка списка доступных моделей...');
-    final downloaded = await ModelDownloader.getDownloadedModels();
+    final downloaded = await downloader.ModelDownloader.getDownloadedModels();
     setState(() {
       _statusMessage = downloaded.isEmpty
           ? 'Нет загруженных моделей. Загрузите модель для начала.'
@@ -57,21 +58,25 @@ class _ModelTestScreenState extends State<ModelTestScreen> {
     });
   }
 
-  Future<void> _downloadModel(String modelName) async {
+  Future<void> _downloadModel(downloader.PresetModel model) async {
     setState(() {
       _isDownloading = true;
       _downloadProgress = 0.0;
-      _statusMessage = 'Загрузка $modelName...';
+      _statusMessage = 'Загрузка ${model.name}...';
     });
 
     try {
-      _addLog('Начинается загрузка $modelName');
+      _addLog('Начинается загрузка ${model.name}');
 
-      final modelPath = await ModelDownloader.downloadModel(
-        modelName,
-        onProgress: (progress) {
+      // Скачиваем первый GGUF файл модели
+      final fileName = model.ggufFiles.first;
+      final modelPath = await downloader.ModelDownloader.downloadModel(
+        modelId: model.id,
+        fileName: fileName,
+        onProgress: (progress, status) {
           setState(() {
             _downloadProgress = progress;
+            _downloadStatus = status;
           });
         },
       );
@@ -308,19 +313,20 @@ class _ModelTestScreenState extends State<ModelTestScreen> {
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
-                  children: ModelDownloader.modelUrls.keys.map((modelName) {
-                    final info =
-                        ModelDownloader.getAvailableModels()[modelName]!;
+                  children: downloader.PresetModels.all.map((model) {
                     return ElevatedButton(
                       onPressed: _isDownloading
                           ? null
-                          : () => _downloadModel(modelName),
+                          : () => _downloadModel(model),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(info.quantization),
                           Text(
-                            info.sizeFormatted,
+                            model.name,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          Text(
+                            model.size,
                             style: const TextStyle(fontSize: 10),
                           ),
                         ],
@@ -332,6 +338,11 @@ class _ModelTestScreenState extends State<ModelTestScreen> {
                   const SizedBox(height: 12),
                   LinearProgressIndicator(value: _downloadProgress),
                   Text('${(_downloadProgress * 100).toStringAsFixed(1)}%'),
+                  if (_downloadStatus.isNotEmpty)
+                    Text(
+                      _downloadStatus,
+                      style: const TextStyle(fontSize: 11),
+                    ),
                 ],
               ],
             ),

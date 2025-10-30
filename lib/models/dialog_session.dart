@@ -51,5 +51,33 @@ class DialogSession {
     if (text.length <= 50) return text;
     return '${text.substring(0, 47)}...';
   }
+
+  /// Преобразовать в JSON
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'createdAt': createdAt.toIso8601String(),
+      'updatedAt': updatedAt.toIso8601String(),
+      'messages': messages.map((m) => m.toJson()).toList(),
+      'promptModeId': promptModeId,
+      'conversationModeId': conversationModeId,
+    };
+  }
+
+  /// Создать из JSON
+  factory DialogSession.fromJson(Map<String, dynamic> json) {
+    return DialogSession(
+      id: json['id'] as String,
+      title: json['title'] as String,
+      createdAt: DateTime.parse(json['createdAt'] as String),
+      updatedAt: DateTime.parse(json['updatedAt'] as String),
+      messages: (json['messages'] as List<dynamic>)
+          .map((m) => Message.fromJson(m as Map<String, dynamic>))
+          .toList(),
+      promptModeId: json['promptModeId'] as String,
+      conversationModeId: json['conversationModeId'] as String,
+    );
+  }
 }
 
